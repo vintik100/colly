@@ -81,9 +81,7 @@ func (r *Request) New(method, URL string, body io.Reader) (*Request, error) {
 
 // Abort cancels the HTTP request when called in an OnRequest callback
 func (r *Request) Abort() {
-	var cancel context.CancelFunc
-	r.Ctx, cancel = context.WithCancel(r.Ctx)
-	cancel()
+	r.abort = true
 }
 
 // AbsoluteURL returns with the resolved absolute URL of an URL chunk.

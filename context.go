@@ -24,19 +24,8 @@ type ctxKey uint8
 
 const (
 	dataCtxKey ctxKey = iota + 1
-	nolimitCtxKey
 	timingsCtxKey
 )
-
-var nolimitCtx = true
-
-func WithNolimitRequestContext(ctx context.Context) context.Context {
-	return context.WithValue(ctx, nolimitCtxKey, &nolimitCtx)
-}
-func ContextNolimitRequest(ctx context.Context) (ok bool) {
-	_, ok = ctx.Value(nolimitCtxKey).(*bool)
-	return
-}
 
 func WithDataContext(ctx context.Context) context.Context {
 	dataCtx := &Context{

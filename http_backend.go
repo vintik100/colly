@@ -34,9 +34,18 @@ import (
 )
 
 type httpBackend struct {
-	LimitRules []*LimitRule
+	LimitRules []LimitRuleI
 	Client     *http.Client
 	lock       *sync.RWMutex
+}
+
+type LimitRuleI interface {
+	Init() error
+	Match(request *http.Request) (WaitDoneI, bool)
+}
+type WaitDoneI interface {
+	Wait()
+	Done()
 }
 
 // LimitRule provides connection restrictions for domains.
@@ -101,7 +110,8 @@ func (h *httpBackend) Init(jar http.CookieJar) {
 }
 
 // Match checks that the domain parameter triggers the rule
-func (r *LimitRule) Match(domain string) bool {
+func (r *LimitRule) Match(request *http.Request) (WaitDoneI, bool) {
+	domain := request.URL.Host
 	match := false
 	if r.compiledRegexp != nil && r.compiledRegexp.MatchString(domain) {
 		match = true
@@ -109,18 +119,31 @@ func (r *LimitRule) Match(domain string) bool {
 	if r.compiledGlob != nil && r.compiledGlob.Match(domain) {
 		match = true
 	}
-	return match
+	return r, match
 }
 
-func (h *httpBackend) GetMatchingRule(domain string) *LimitRule {
+func (r *LimitRule) Wait() {
+	r.waitChan <- true
+}
+
+func (r *LimitRule) Done() {
+	randomDelay := time.Duration(0)
+	if r.RandomDelay != 0 {
+		randomDelay = time.Duration(rand.Int63n(int64(r.RandomDelay)))
+	}
+	time.Sleep(r.Delay + randomDelay)
+	<-r.waitChan
+}
+
+func (h *httpBackend) GetMatchingRule(request *http.Request) WaitDoneI {
 	if h.LimitRules == nil {
 		return nil
 	}
 	h.lock.RLock()
 	defer h.lock.RUnlock()
 	for _, r := range h.LimitRules {
-		if r.Match(domain) {
-			return r
+		if wd, ok := r.Match(request); ok {
+			return wd
 		}
 	}
 	return nil
@@ -136,9 +159,9 @@ func (h *httpBackend) Cache(request *http.Request, bodySize int, cacheDir string
 	filename := path.Join(dir, hash)
 
 	if _, err := os.Stat(filename); err == nil {
-		r := h.GetMatchingRule(request.URL.Host)
+		r := h.GetMatchingRule(request)
 		if r != nil {
-			r.waitChan <- true
+			r.Wait()
 		}
 		if file, err := os.Open(filename); err == nil {
 			stats := ContextTimings(request.Context())
@@ -150,7 +173,7 @@ func (h *httpBackend) Cache(request *http.Request, bodySize int, cacheDir string
 			file.Close()
 			if resp.StatusCode < 500 {
 				if r != nil {
-					<-r.waitChan
+					r.Done()
 				}
 				if stats != nil {
 					stats.DownloadEnd = time.Now()
@@ -159,7 +182,7 @@ func (h *httpBackend) Cache(request *http.Request, bodySize int, cacheDir string
 			}
 		}
 		if r != nil {
-			<-r.waitChan
+			r.Done()
 		}
 	}
 	resp, err := h.Do(request, bodySize)
@@ -184,19 +207,12 @@ func (h *httpBackend) Cache(request *http.Request, bodySize int, cacheDir string
 }
 
 func (h *httpBackend) Do(request *http.Request, bodySize int) (*Response, error) {
-	if !ContextNolimitRequest(request.Context()) {
-		r := h.GetMatchingRule(request.URL.Host)
-		if r != nil {
-			r.waitChan <- true
-			defer func(r *LimitRule) {
-				randomDelay := time.Duration(0)
-				if r.RandomDelay != 0 {
-					randomDelay = time.Duration(rand.Int63n(int64(r.RandomDelay)))
-				}
-				time.Sleep(r.Delay + randomDelay)
-				<-r.waitChan
-			}(r)
-		}
+	r := h.GetMatchingRule(request)
+	if r != nil {
+		r.Wait()
+		defer func(r WaitDoneI) {
+			r.Done()
+		}(r)
 	}
 
 	stats := ContextTimings(request.Context())
@@ -236,17 +252,17 @@ func (h *httpBackend) Do(request *http.Request, bodySize int) (*Response, error)
 	}, nil
 }
 
-func (h *httpBackend) Limit(rule *LimitRule) error {
+func (h *httpBackend) Limit(rule LimitRuleI) error {
 	h.lock.Lock()
 	if h.LimitRules == nil {
-		h.LimitRules = make([]*LimitRule, 0, 8)
+		h.LimitRules = make([]LimitRuleI, 0, 8)
 	}
 	h.LimitRules = append(h.LimitRules, rule)
 	h.lock.Unlock()
 	return rule.Init()
 }
 
-func (h *httpBackend) Limits(rules []*LimitRule) error {
+func (h *httpBackend) Limits(rules []LimitRuleI) error {
 	for _, r := range rules {
 		if err := h.Limit(r); err != nil {
 			return err

@@ -127,10 +127,10 @@ type RequestCallback func(*Request)
 type ResponseCallback func(*Response)
 
 // HTMLCallback is a type alias for OnHTML callback functions
-type HTMLCallback func(*HTMLElement)
+type HTMLCallback func(*HTMLElement, *Response)
 
 // XMLCallback is a type alias for OnXML callback functions
-type XMLCallback func(*XMLElement)
+type XMLCallback func(*XMLElement, *Response)
 
 // ErrorCallback is a type alias for OnError callback functions
 type ErrorCallback func(*Response, error)
@@ -597,8 +597,13 @@ func (c *Collector) fetch(u, method string, depth int, requestData io.Reader, ct
 
 	err := c.handleOnRequest(request)
 	if err != nil {
-		return err
+		c.handleOnError(nil, err, request, request.Ctx)
 	}
+
+	if request.abort {
+		return nil
+	}
+
 	req = req.WithContext(request.Ctx)
 
 	if method == "POST" && req.Header.Get("Content-Type") == "" {
@@ -626,11 +631,11 @@ func (c *Collector) fetch(u, method string, depth int, requestData io.Reader, ct
 	response.Ctx = ctx
 	response.Request = request
 
-	if stats != nil {
+	if c.DetectCharset && stats != nil {
 		stats.CharsetFixStart = time.Now()
 	}
 	err = response.fixCharset(c.DetectCharset, request.ResponseCharacterEncoding)
-	if stats != nil {
+	if c.DetectCharset && stats != nil {
 		stats.CharsetFixEnd = time.Now()
 	}
 	if err != nil {
@@ -645,24 +650,15 @@ func (c *Collector) fetch(u, method string, depth int, requestData io.Reader, ct
 	}
 
 	err = c.handleOnHTML(response)
-	select {
-	case <-response.Ctx.Done():
-		return response.Ctx.Err()
-	default:
-	}
 	if err != nil {
 		c.handleOnError(response, err, request, ctx)
 	}
 
 	err = c.handleOnXML(response)
-	select {
-	case <-response.Ctx.Done():
-		return response.Ctx.Err()
-	default:
-	}
 	if err != nil {
 		c.handleOnError(response, err, request, ctx)
 	}
+
 	if stats != nil {
 		stats.ProcessEnd = time.Now()
 	}
@@ -1008,7 +1004,7 @@ func (c *Collector) handleOnHTML(resp *Response) error {
 						"url":      resp.Request.URL.String(),
 					}))
 				}
-				cc.Function(e)
+				cc.Function(e, resp)
 			}
 		})
 	}
@@ -1047,8 +1043,14 @@ func (c *Collector) handleOnXML(resp *Response) error {
 						"url":      resp.Request.URL.String(),
 					}))
 				}
-				cc.Function(e)
+				cc.Function(e, resp)
+
 			})
+			select {
+			case <-resp.Ctx.Done():
+				return resp.Ctx.Err()
+			default:
+			}
 		}
 	} else if strings.Contains(contentType, "xml") {
 		doc, err := xmlquery.Parse(bytes.NewBuffer(resp.Body))
@@ -1065,8 +1067,13 @@ func (c *Collector) handleOnXML(resp *Response) error {
 						"url":      resp.Request.URL.String(),
 					}))
 				}
-				cc.Function(e)
+				cc.Function(e, resp)
 			})
+			select {
+			case <-resp.Ctx.Done():
+				return resp.Ctx.Err()
+			default:
+			}
 		}
 	}
 	return nil
@@ -1120,12 +1127,12 @@ func (c *Collector) handleOnScraped(r *Response) {
 }
 
 // Limit adds a new LimitRule to the collector
-func (c *Collector) Limit(rule *LimitRule) error {
+func (c *Collector) Limit(rule LimitRuleI) error {
 	return c.backend.Limit(rule)
 }
 
 // Limits adds new LimitRules to the collector
-func (c *Collector) Limits(rules []*LimitRule) error {
+func (c *Collector) Limits(rules []LimitRuleI) error {
 	return c.backend.Limits(rules)
 }
 
